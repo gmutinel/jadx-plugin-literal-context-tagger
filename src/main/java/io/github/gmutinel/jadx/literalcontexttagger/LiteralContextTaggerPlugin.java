@@ -7,10 +7,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,7 +57,11 @@ public class LiteralContextTaggerPlugin implements JadxPlugin {
 			"setAlpha", "setVisibility", "setEnabled", "setBackgroundColor", "setTextColor",
 			"setScaleX", "setScaleY", "setTranslationX", "setTranslationY", "setDuration", "setElevation"));
 
-	private final List<String> records = new ArrayList<>();
+	/**
+	 * Filled from jadx's decompile threads. jadx visits most methods more than once, and how many times depends on
+	 * the thread schedule: identical records are kept once, in sorted order, so the sidecar is the same on every run.
+	 */
+	private final SortedSet<String> records = Collections.synchronizedSortedSet(new TreeSet<>());
 	private volatile Path outputPath;
 	private volatile RootNode rootNode;
 
@@ -134,28 +141,50 @@ public class LiteralContextTaggerPlugin implements JadxPlugin {
 				cls, name, escape(callTarget), argIndex, literalStr);
 	}
 
+	/** A JSON string body: quote, backslash and every control character escaped. */
 	private static String escape(String s) {
-		return s.replace("\\", "\\\\").replace("\"", "\\\"");
+		StringBuilder b = new StringBuilder(s.length() + 8);
+		for (int i = 0; i < s.length(); i++) {
+			char c = s.charAt(i);
+			switch (c) {
+				case '"': b.append("\\\""); break;
+				case '\\': b.append("\\\\"); break;
+				case '\n': b.append("\\n"); break;
+				case '\r': b.append("\\r"); break;
+				case '\t': b.append("\\t"); break;
+				default:
+					if (c < 0x20) {
+						b.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+					} else {
+						b.append(c);
+					}
+			}
+		}
+		return b.toString();
 	}
 
 	@Override
 	public void unload() {
 		Path path = outputPath;
-		if (path == null || records.isEmpty()) {
+		List<String> sorted;
+		synchronized (records) {
+			sorted = new ArrayList<>(records);
+		}
+		if (path == null || sorted.isEmpty()) {
 			return;
 		}
 		try {
 			Files.createDirectories(path.getParent());
 			try (Writer w = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
 				w.write("[\n");
-				for (int i = 0; i < records.size(); i++) {
+				for (int i = 0; i < sorted.size(); i++) {
 					w.write("  ");
-					w.write(records.get(i));
-					w.write(i < records.size() - 1 ? ",\n" : "\n");
+					w.write(sorted.get(i));
+					w.write(i < sorted.size() - 1 ? ",\n" : "\n");
 				}
 				w.write("]\n");
 			}
-			LOG.info("Wrote {} literal context tags to {}", records.size(), path);
+			LOG.info("Wrote {} literal context tags to {}", sorted.size(), path);
 		} catch (IOException e) {
 			LOG.error("Failed to write literal context tags", e);
 		} finally {
